@@ -253,6 +253,57 @@ def optimize_route_greedy(df, max_weight, max_volume, north_pole_lat=90.0, north
     naughty_count = len([r for r in route if not r['nice']])
     nice_count = len(route) - naughty_count
 
+    # Calculate time constraint
+    time_constraint_met = delivery_time_hours <= 7
+
+    # SCORING SYSTEM (same as optimize_route)
+    score = 0
+    score_details = {}
+
+    if time_constraint_met and len(route) > 0:
+        score_details['musskriterien_erfuellt'] = True
+
+        # 1. Distanz-Effizienz (max 40 Punkte)
+        avg_dist = total_distance / len(route) if len(route) > 0 else float('inf')
+        distance_score = max(0, min(40, 40 * (1 - (avg_dist - 200) / 800)))
+        score += distance_score
+        score_details['distanz_effizienz'] = round(distance_score, 1)
+
+        # 2. Kapazitätsauslastung (max 20 Punkte)
+        weight_util = (current_weight / max_weight) * 100
+        volume_util = (current_volume / max_volume) * 100
+        avg_util = (weight_util + volume_util) / 2
+        if 80 <= avg_util <= 95:
+            capacity_score = 20
+        elif 70 <= avg_util < 80 or 95 < avg_util <= 100:
+            capacity_score = 15
+        elif 60 <= avg_util < 70:
+            capacity_score = 10
+        else:
+            capacity_score = 5
+        score += capacity_score
+        score_details['kapazitaetsauslastung'] = capacity_score
+
+        # 3. Zeiteffizienz (max 20 Punkte)
+        time_buffer = 7 - delivery_time_hours
+        time_score = max(0, min(20, (time_buffer / 7) * 20))
+        score += time_score
+        score_details['zeiteffizienz'] = round(time_score, 1)
+
+        # 4. Anzahl belieferter Kinder (max 20 Punkte)
+        children_score = min(20, (len(route) / 100) * 20)
+        score += children_score
+        score_details['anzahl_kinder'] = round(children_score, 1)
+
+        score_details['gesamtpunktzahl'] = round(score, 1)
+        score_details['max_punktzahl'] = 100
+        score_details['prozent'] = round((score / 100) * 100, 1)
+        score_details['algorithmus'] = 'Greedy (Fallback)'
+    else:
+        score_details['musskriterien_erfuellt'] = False
+        score_details['grund'] = 'Zeitfenster nicht eingehalten' if not time_constraint_met else 'Keine Kinder beliefert'
+        score = 0
+
     metrics = {
         'total_distance_km': round(total_distance, 2),
         'total_weight_kg': round(current_weight, 2),
@@ -263,8 +314,9 @@ def optimize_route_greedy(df, max_weight, max_volume, north_pole_lat=90.0, north
         'naughty_children': naughty_count,
         'weight_utilization_percent': round((current_weight / max_weight) * 100, 1),
         'volume_utilization_percent': round((current_volume / max_volume) * 100, 1),
-        'time_constraint_met': delivery_time_hours <= 7,
-        'avg_distance_per_child': round(total_distance / len(route), 2) if route else 0
+        'time_constraint_met': time_constraint_met,
+        'avg_distance_per_child': round(total_distance / len(route), 2) if route else 0,
+        'score': score_details
     }
 
     return route, metrics
@@ -274,7 +326,10 @@ def optimize_route(df, max_weight=MAX_SLEIGH_WEIGHT, max_volume=MAX_SLEIGH_VOLUM
                    sample_size=500, north_pole_lat=90.0, north_pole_lon=0.0):
     """
     Optimize delivery route using OR-Tools Vehicle Routing Problem solver
+    with TIME WINDOW CONSTRAINT (22:00-05:00 = 7 hours max)
     """
+    MAX_DELIVERY_HOURS = 7  # MUSSKRITERIUM: 22:00 bis 05:00
+
     # For large datasets, sample to keep computation reasonable
     if len(df) > sample_size:
         df_sample = df.sample(n=sample_size, random_state=42)
@@ -297,6 +352,20 @@ def optimize_route(df, max_weight=MAX_SLEIGH_WEIGHT, max_volume=MAX_SLEIGH_VOLUM
         adjusted_size = max(10, adjusted_size)  # At least 10 children
 
         df_sample = df_sample.head(adjusted_size)
+
+    # ZUSÄTZLICH: Prüfe Zeitfenster und reduziere Sample weiter falls nötig
+    # Bei global verteilten Kindern: ~5000km Durchschnittsdistanz pro Kind
+    # Bei regional geclusterten Kindern: ~500km Durchschnittsdistanz
+    # Konservative Schätzung: 3000km average für gemischte Verteilung
+    max_distance_for_time = MAX_DELIVERY_HOURS * SLEIGH_SPEED_KMH  # 3500 km
+    estimated_avg_distance_per_child = 3000  # km (konservativ für globale Verteilung)
+    estimated_stops_for_time = int(max_distance_for_time / estimated_avg_distance_per_child)  # ~1 Kind pro 7h Zeitfenster für globale Verteilung
+
+    # Das ist zu restriktiv! Lockern wir es: Wir erlauben mehr Kinder und checken nachträglich
+    # Stattdessen: Erlauben wir 20 Kinder und optimieren dann
+    if len(df_sample) > 20:
+        print(f"⚠️  Time constraint: Limiting to 20 children for preliminary optimization")
+        df_sample = df_sample.head(20)
 
     # Add North Pole as starting point
     locations = [(north_pole_lat, north_pole_lon)] + list(zip(df_sample['latitude'], df_sample['longitude']))
@@ -408,6 +477,66 @@ def optimize_route(df, max_weight=MAX_SLEIGH_WEIGHT, max_volume=MAX_SLEIGH_VOLUM
     naughty_count = len([r for r in route if not r['nice']])
     nice_count = len(route) - naughty_count
 
+    # Calculate time constraint
+    time_constraint_met = delivery_time_hours <= 7
+
+    # SCORING SYSTEM - Gewinnkriterien
+    score = 0
+    score_details = {}
+
+    # MUSSKRITERIEN (müssen erfüllt sein, sonst 0 Punkte)
+    if time_constraint_met and len(route) > 0:
+        score_details['musskriterien_erfuellt'] = True
+
+        # GEWINNKRITERIEN (Punkte sammeln)
+        # 1. Distanz-Effizienz (max 40 Punkte)
+        #    Je kürzer die durchschnittliche Distanz pro Kind, desto besser
+        avg_dist = total_distance / len(route) if len(route) > 0 else float('inf')
+        # Unter 200km/Kind = 40 Punkte, über 1000km/Kind = 0 Punkte
+        distance_score = max(0, min(40, 40 * (1 - (avg_dist - 200) / 800)))
+        score += distance_score
+        score_details['distanz_effizienz'] = round(distance_score, 1)
+
+        # 2. Kapazitätsauslastung (max 20 Punkte)
+        #    Optimale Nutzung des Schlittens
+        weight_util = (total_weight / max_weight) * 100
+        volume_util = (total_volume / max_volume) * 100
+        # Ideal: 80-95% Auslastung
+        avg_util = (weight_util + volume_util) / 2
+        if 80 <= avg_util <= 95:
+            capacity_score = 20
+        elif 70 <= avg_util < 80 or 95 < avg_util <= 100:
+            capacity_score = 15
+        elif 60 <= avg_util < 70:
+            capacity_score = 10
+        else:
+            capacity_score = 5
+        score += capacity_score
+        score_details['kapazitaetsauslastung'] = capacity_score
+
+        # 3. Zeiteffizienz (max 20 Punkte)
+        #    Je mehr Puffer im Zeitfenster, desto besser
+        time_buffer = 7 - delivery_time_hours
+        time_score = max(0, min(20, (time_buffer / 7) * 20))
+        score += time_score
+        score_details['zeiteffizienz'] = round(time_score, 1)
+
+        # 4. Anzahl belieferter Kinder (max 20 Punkte)
+        #    Mehr Kinder = mehr Punkte
+        children_score = min(20, (len(route) / 100) * 20)
+        score += children_score
+        score_details['anzahl_kinder'] = round(children_score, 1)
+
+        score_details['gesamtpunktzahl'] = round(score, 1)
+        score_details['max_punktzahl'] = 100
+        score_details['prozent'] = round((score / 100) * 100, 1)
+        score_details['algorithmus'] = 'OR-Tools VRP'
+    else:
+        score_details['musskriterien_erfuellt'] = False
+        score_details['grund'] = 'Zeitfenster nicht eingehalten' if not time_constraint_met else 'Keine Kinder beliefert'
+        score = 0
+        score_details['algorithmus'] = 'OR-Tools VRP'
+
     metrics = {
         'total_distance_km': round(total_distance, 2),
         'total_weight_kg': round(total_weight, 2),
@@ -418,8 +547,9 @@ def optimize_route(df, max_weight=MAX_SLEIGH_WEIGHT, max_volume=MAX_SLEIGH_VOLUM
         'naughty_children': naughty_count,
         'weight_utilization_percent': round((total_weight / max_weight) * 100, 1),
         'volume_utilization_percent': round((total_volume / max_volume) * 100, 1),
-        'time_constraint_met': delivery_time_hours <= 7,  # 22:00 to 05:00 = 7 hours
-        'avg_distance_per_child': round(total_distance / len(route), 2) if route else 0
+        'time_constraint_met': time_constraint_met,
+        'avg_distance_per_child': round(total_distance / len(route), 2) if route else 0,
+        'score': score_details
     }
 
     return route, metrics
