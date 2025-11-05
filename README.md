@@ -33,6 +33,29 @@ Eine KI-gestützte Webanwendung zur Optimierung der Weihnachtsauslieferung des W
 
 ## 🚀 Installation & Start
 
+### Option A: Von GitHub klonen
+
+```bash
+# 1. Repository klonen
+git clone https://github.com/Simon0211/AdvML.git
+cd AdvML
+
+# 2. Zum richtigen Branch wechseln
+git checkout claude/santa-delivery-optimizer-011CUpXmP5Q3GTAn6YYeiGuW
+
+# 3. Abhängigkeiten installieren
+pip install -r requirements.txt
+
+# 4. App starten
+python app.py
+
+# 5. Browser öffnen: http://localhost:5000
+```
+
+**Wichtig:** Stellen Sie sicher, dass Sie im `AdvML` Verzeichnis sind wenn Sie `python app.py` ausführen!
+
+### Option B: Lokale Entwicklung
+
 ### Voraussetzungen
 - Python 3.8 oder höher
 - pip (Python Package Manager)
@@ -46,6 +69,21 @@ pip install -r requirements.txt
 ```bash
 python app.py
 ```
+
+Beim Start sehen Sie:
+```
+============================================================
+🎅 Santa's Delivery Route Optimizer
+============================================================
+📁 Working directory: /path/to/AdvML
+📁 Script directory: /path/to/AdvML
+✅ Found dataset: santa_children_dataset_50k.csv (6.2 MB)
+============================================================
+📍 Access the app at: http://localhost:5000
+============================================================
+```
+
+**Wenn die CSV-Datei fehlt**, erstellt die App automatisch ein Demo-Dataset mit 100 Kindern.
 
 ### Schritt 3: Browser öffnen
 Öffnen Sie einen Browser und navigieren Sie zu:
