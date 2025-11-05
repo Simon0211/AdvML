@@ -1,0 +1,296 @@
+"""
+Santa's Delivery Route Optimizer
+Optimizes delivery routes considering constraints and time windows
+"""
+
+from flask import Flask, render_template, jsonify, request
+from flask_cors import CORS
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import json
+from ortools.constraint_solver import routing_enums_pb2
+from ortools.constraint_solver import pywrapcp
+
+app = Flask(__name__)
+CORS(app)
+
+# Constants
+COAL_WEIGHT = 0.1  # kg
+COAL_VOLUME = 0.1  # liters
+MAX_SLEIGH_WEIGHT = 1000  # kg
+MAX_SLEIGH_VOLUME = 5000  # liters
+DELIVERY_START_HOUR = 22
+DELIVERY_END_HOUR = 5
+SLEIGH_SPEED_KMH = 500  # Santa's magic sleigh!
+
+# Global data store
+data_store = {
+    'children': None,
+    'route': None,
+    'metrics': None
+}
+
+
+def load_data():
+    """Load and preprocess the children dataset"""
+    df = pd.read_csv('santa_children_dataset_50k.csv')
+
+    # Replace gifts with coal for naughty children
+    naughty_mask = df['nice'] == 0
+    df.loc[naughty_mask, 'wishlist_item'] = 'Coal'
+    df.loc[naughty_mask, 'gift_weight_kg'] = COAL_WEIGHT
+    df.loc[naughty_mask, 'gift_volume_l'] = COAL_VOLUME
+
+    return df
+
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    """Calculate distance between two points using Haversine formula"""
+    R = 6371  # Earth's radius in km
+
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+    c = 2 * np.arcsin(np.sqrt(a))
+
+    return R * c
+
+
+def create_distance_matrix(locations):
+    """Create distance matrix for all locations"""
+    n = len(locations)
+    matrix = np.zeros((n, n))
+
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                matrix[i][j] = calculate_distance(
+                    locations[i][0], locations[i][1],
+                    locations[j][0], locations[j][1]
+                )
+
+    return matrix
+
+
+def optimize_route(df, max_weight=MAX_SLEIGH_WEIGHT, max_volume=MAX_SLEIGH_VOLUME,
+                   sample_size=500, north_pole_lat=90.0, north_pole_lon=0.0):
+    """
+    Optimize delivery route using OR-Tools Vehicle Routing Problem solver
+    """
+    # For large datasets, sample to keep computation reasonable
+    if len(df) > sample_size:
+        df_sample = df.sample(n=sample_size, random_state=42)
+    else:
+        df_sample = df.copy()
+
+    # Add North Pole as starting point
+    locations = [(north_pole_lat, north_pole_lon)] + list(zip(df_sample['latitude'], df_sample['longitude']))
+    weights = [0] + df_sample['gift_weight_kg'].tolist()
+    volumes = [0] + df_sample['gift_volume_l'].tolist()
+
+    # Create distance matrix
+    distance_matrix = create_distance_matrix(locations)
+
+    # Convert to integers for OR-Tools (multiply by 1000 to preserve precision)
+    distance_matrix_int = (distance_matrix * 1000).astype(int)
+    weights_int = (np.array(weights) * 1000).astype(int)
+    volumes_int = (np.array(volumes) * 1000).astype(int)
+
+    # Create routing model
+    manager = pywrapcp.RoutingIndexManager(len(distance_matrix_int), 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
+
+    # Create distance callback
+    def distance_callback(from_index, to_index):
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return distance_matrix_int[from_node][to_node]
+
+    transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+
+    # Add weight capacity constraint
+    def weight_callback(from_index):
+        from_node = manager.IndexToNode(from_index)
+        return weights_int[from_node]
+
+    weight_callback_index = routing.RegisterUnaryTransitCallback(weight_callback)
+    routing.AddDimensionWithVehicleCapacity(
+        weight_callback_index,
+        0,  # null capacity slack
+        [int(max_weight * 1000)],  # vehicle maximum capacities
+        True,  # start cumul to zero
+        'Weight'
+    )
+
+    # Add volume capacity constraint
+    def volume_callback(from_index):
+        from_node = manager.IndexToNode(from_index)
+        return volumes_int[from_node]
+
+    volume_callback_index = routing.RegisterUnaryTransitCallback(volume_callback)
+    routing.AddDimensionWithVehicleCapacity(
+        volume_callback_index,
+        0,  # null capacity slack
+        [int(max_volume * 1000)],  # vehicle maximum capacities
+        True,  # start cumul to zero
+        'Volume'
+    )
+
+    # Set search parameters
+    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+    search_parameters.first_solution_strategy = (
+        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    )
+    search_parameters.local_search_metaheuristic = (
+        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    )
+    search_parameters.time_limit.seconds = 30
+
+    # Solve
+    solution = routing.SolveWithParameters(search_parameters)
+
+    if solution:
+        # Extract route
+        route = []
+        index = routing.Start(0)
+        total_distance = 0
+        total_weight = 0
+        total_volume = 0
+
+        while not routing.IsEnd(index):
+            node = manager.IndexToNode(index)
+            if node > 0:  # Skip North Pole start
+                child_idx = df_sample.index[node - 1]
+                route.append({
+                    'child_id': int(df_sample.loc[child_idx, 'child_id']),
+                    'name': df_sample.loc[child_idx, 'name'],
+                    'city': df_sample.loc[child_idx, 'city'],
+                    'country': df_sample.loc[child_idx, 'country'],
+                    'latitude': float(df_sample.loc[child_idx, 'latitude']),
+                    'longitude': float(df_sample.loc[child_idx, 'longitude']),
+                    'wishlist_item': df_sample.loc[child_idx, 'wishlist_item'],
+                    'gift_weight_kg': float(df_sample.loc[child_idx, 'gift_weight_kg']),
+                    'gift_volume_l': float(df_sample.loc[child_idx, 'gift_volume_l']),
+                    'nice': bool(df_sample.loc[child_idx, 'nice']),
+                    'order': len(route) + 1
+                })
+                total_weight += weights[node]
+                total_volume += volumes[node]
+
+            previous_index = index
+            index = solution.Value(routing.NextVar(index))
+            total_distance += routing.GetArcCostForVehicle(previous_index, index, 0) / 1000.0
+
+        # Calculate delivery time
+        delivery_time_hours = total_distance / SLEIGH_SPEED_KMH
+
+        # Calculate metrics
+        naughty_count = len([r for r in route if not r['nice']])
+        nice_count = len(route) - naughty_count
+
+        metrics = {
+            'total_distance_km': round(total_distance, 2),
+            'total_weight_kg': round(total_weight, 2),
+            'total_volume_l': round(total_volume, 2),
+            'delivery_time_hours': round(delivery_time_hours, 2),
+            'children_delivered': len(route),
+            'nice_children': nice_count,
+            'naughty_children': naughty_count,
+            'weight_utilization_percent': round((total_weight / max_weight) * 100, 1),
+            'volume_utilization_percent': round((total_volume / max_volume) * 100, 1),
+            'time_constraint_met': delivery_time_hours <= 7,  # 22:00 to 05:00 = 7 hours
+            'avg_distance_per_child': round(total_distance / len(route), 2) if route else 0
+        }
+
+        return route, metrics
+    else:
+        return None, None
+
+
+@app.route('/')
+def index():
+    """Serve the main page"""
+    return render_template('index.html')
+
+
+@app.route('/api/load_data', methods=['GET'])
+def api_load_data():
+    """Load and return basic dataset info"""
+    try:
+        df = load_data()
+        data_store['children'] = df
+
+        info = {
+            'total_children': len(df),
+            'nice_children': int(df['nice'].sum()),
+            'naughty_children': int((df['nice'] == 0).sum()),
+            'total_weight_kg': round(df['gift_weight_kg'].sum(), 2),
+            'total_volume_l': round(df['gift_volume_l'].sum(), 2),
+            'countries': df['country'].nunique(),
+            'cities': df['city'].nunique()
+        }
+
+        return jsonify({'success': True, 'data': info})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/optimize', methods=['POST'])
+def api_optimize():
+    """Optimize the delivery route"""
+    try:
+        params = request.get_json()
+        max_weight = params.get('max_weight', MAX_SLEIGH_WEIGHT)
+        max_volume = params.get('max_volume', MAX_SLEIGH_VOLUME)
+        sample_size = params.get('sample_size', 500)
+
+        if data_store['children'] is None:
+            df = load_data()
+            data_store['children'] = df
+
+        route, metrics = optimize_route(
+            data_store['children'],
+            max_weight=max_weight,
+            max_volume=max_volume,
+            sample_size=sample_size
+        )
+
+        if route is not None:
+            data_store['route'] = route
+            data_store['metrics'] = metrics
+
+            return jsonify({
+                'success': True,
+                'route': route,
+                'metrics': metrics
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Could not find a valid route'
+            })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/export_route', methods=['GET'])
+def api_export_route():
+    """Export the current route as JSON"""
+    if data_store['route'] is None:
+        return jsonify({'success': False, 'error': 'No route available'})
+
+    return jsonify({
+        'success': True,
+        'route': data_store['route'],
+        'metrics': data_store['metrics']
+    })
+
+
+if __name__ == '__main__':
+    print("🎅 Starting Santa's Delivery Optimizer...")
+    print("📍 Access the app at: http://localhost:5000")
+    app.run(debug=True, host='0.0.0.0', port=5000)
