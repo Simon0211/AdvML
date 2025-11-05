@@ -343,6 +343,48 @@
             </div>
         </div>
 
+        <div class="card" id="scoringCard" style="display: none;">
+            <h2>🏆 Bewertung (Gewinnkriterien)</h2>
+            <div style="text-align: center; margin: 20px 0;">
+                <div style="font-size: 3em; font-weight: bold; color: #fbbf24;" id="scoreTotal">-</div>
+                <div style="font-size: 1.2em; opacity: 0.9;" id="scorePercent">-</div>
+                <div style="margin-top: 10px; padding: 10px; border-radius: 8px; display: inline-block;" id="musskriterienBadge"></div>
+            </div>
+            <div class="metrics-grid">
+                <div class="metric">
+                    <div class="metric-label">Distanz-Effizienz</div>
+                    <div class="metric-value" id="scoreDistance" style="font-size: 1.5em;">-</div>
+                    <div class="metric-label">von 40 Punkten</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Kapazitätsauslastung</div>
+                    <div class="metric-value" id="scoreCapacity" style="font-size: 1.5em;">-</div>
+                    <div class="metric-label">von 20 Punkten</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Zeiteffizienz</div>
+                    <div class="metric-value" id="scoreTime" style="font-size: 1.5em;">-</div>
+                    <div class="metric-label">von 20 Punkten</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Anzahl Kinder</div>
+                    <div class="metric-value" id="scoreChildren" style="font-size: 1.5em;">-</div>
+                    <div class="metric-label">von 20 Punkten</div>
+                </div>
+            </div>
+            <div style="margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.1); border-radius: 8px;">
+                <strong>📋 Bewertungskriterien:</strong><br>
+                <ul style="text-align: left; margin: 10px 0; padding-left: 20px;">
+                    <li><strong>Musskriterien (Pflicht):</strong> Zeitfenster 22:00-05:00 einhalten (max 7h), alle Kinder beliefern</li>
+                    <li><strong>Distanz-Effizienz (40%):</strong> Kürzere Durchschnittsdistanz = mehr Punkte</li>
+                    <li><strong>Kapazitätsauslastung (20%):</strong> Optimale Nutzung (80-95% ideal)</li>
+                    <li><strong>Zeiteffizienz (20%):</strong> Mehr Zeitpuffer = mehr Punkte</li>
+                    <li><strong>Anzahl Kinder (20%):</strong> Mehr belieferte Kinder = mehr Punkte</li>
+                </ul>
+                <div style="margin-top: 10px; font-size: 0.9em; opacity: 0.8;" id="algorithmInfo">-</div>
+            </div>
+        </div>
+
         <div class="card">
             <h2>📋 Lieferreihenfolge (erste 50 Stopps)</h2>
             <div class="route-list" id="routeList">
@@ -507,6 +549,38 @@
             ];
             utilizationChart.update();
 
+            // Update scoring
+            if (metrics.score) {
+                document.getElementById('scoringCard').style.display = 'block';
+
+                const score = metrics.score;
+                if (score.musskriterien_erfuellt) {
+                    document.getElementById('scoreTotal').textContent = score.gesamtpunktzahl + ' / ' + score.max_punktzahl;
+                    document.getElementById('scorePercent').textContent = score.prozent + '% erreicht';
+                    document.getElementById('musskriterienBadge').innerHTML = '✅ Musskriterien erfüllt';
+                    document.getElementById('musskriterienBadge').style.background = 'rgba(34, 197, 94, 0.3)';
+                    document.getElementById('musskriterienBadge').style.border = '2px solid #22c55e';
+
+                    document.getElementById('scoreDistance').textContent = score.distanz_effizienz;
+                    document.getElementById('scoreCapacity').textContent = score.kapazitaetsauslastung;
+                    document.getElementById('scoreTime').textContent = score.zeiteffizienz;
+                    document.getElementById('scoreChildren').textContent = score.anzahl_kinder;
+                } else {
+                    document.getElementById('scoreTotal').textContent = '0 / 100';
+                    document.getElementById('scorePercent').textContent = '0% erreicht';
+                    document.getElementById('musskriterienBadge').innerHTML = '❌ ' + (score.grund || 'Musskriterien nicht erfüllt');
+                    document.getElementById('musskriterienBadge').style.background = 'rgba(239, 68, 68, 0.3)';
+                    document.getElementById('musskriterienBadge').style.border = '2px solid #ef4444';
+
+                    document.getElementById('scoreDistance').textContent = '0';
+                    document.getElementById('scoreCapacity').textContent = '0';
+                    document.getElementById('scoreTime').textContent = '0';
+                    document.getElementById('scoreChildren').textContent = '0';
+                }
+
+                document.getElementById('algorithmInfo').textContent = 'Algorithmus: ' + (score.algorithmus || 'Unbekannt');
+            }
+
             // Update map
             routeLayer.clearLayers();
 
@@ -557,26 +631,37 @@
 
             // Fit map to route
             if (route.length > 0) {
-                map.fitBounds(routeLayer.getBounds(), { padding: [50, 50] });
+                try {
+                    // Create bounds from route coordinates
+                    const bounds = L.latLngBounds(routeCoords);
+                    map.fitBounds(bounds, { padding: [50, 50] });
+                } catch (e) {
+                    console.error('Error fitting map bounds:', e);
+                    map.setView([40, 0], 2); // Fallback view
+                }
             }
 
             // Update route list (show first 50)
             const routeList = document.getElementById('routeList');
-            routeList.innerHTML = route.slice(0, 50).map(stop => `
-                <div class="route-item">
-                    <span>
-                        <strong>${stop.order}.</strong> ${stop.name} - ${stop.city}, ${stop.country}
-                        <br>
-                        <small>${stop.wishlist_item} (${stop.gift_weight_kg} kg, ${stop.gift_volume_l} L)</small>
-                    </span>
-                    <span class="nice-badge ${stop.nice ? 'nice' : 'naughty'}">
-                        ${stop.nice ? '✅ Brav' : '🪨 Kohle'}
-                    </span>
-                </div>
-            `).join('');
+            if (route.length === 0) {
+                routeList.innerHTML = '<p style="opacity: 0.7; text-align: center;">Keine Route berechnet</p>';
+            } else {
+                routeList.innerHTML = route.slice(0, 50).map(stop => `
+                    <div class="route-item">
+                        <span>
+                            <strong>${stop.order}.</strong> ${stop.name} - ${stop.city}, ${stop.country}
+                            <br>
+                            <small>${stop.wishlist_item} (${stop.gift_weight_kg} kg, ${stop.gift_volume_l} L)</small>
+                        </span>
+                        <span class="nice-badge ${stop.nice ? 'nice' : 'naughty'}">
+                            ${stop.nice ? '✅ Brav' : '🪨 Kohle'}
+                        </span>
+                    </div>
+                `).join('');
 
-            if (route.length > 50) {
-                routeList.innerHTML += `<p style="text-align: center; opacity: 0.7; margin-top: 10px;">... und ${route.length - 50} weitere Stopps</p>`;
+                if (route.length > 50) {
+                    routeList.innerHTML += `<p style="text-align: center; opacity: 0.7; margin-top: 10px;">... und ${route.length - 50} weitere Stopps</p>`;
+                }
             }
         }
 
