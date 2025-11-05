@@ -41,13 +41,22 @@ def load_data():
     # Use absolute path relative to script location
     csv_path = os.path.join(SCRIPT_DIR, 'santa_children_dataset_50k.csv')
 
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(
-            f"Dataset not found at {csv_path}. "
-            f"Please ensure santa_children_dataset_50k.csv is in the same directory as app.py"
-        )
+    print(f"📂 Looking for dataset at: {csv_path}")
 
-    df = pd.read_csv(csv_path)
+    if not os.path.exists(csv_path):
+        # Try to create a small demo dataset
+        print("⚠️  Large dataset not found! Creating small demo dataset...")
+        return create_demo_dataset()
+
+    print(f"✅ Found dataset file ({os.path.getsize(csv_path) / 1024 / 1024:.1f} MB)")
+
+    try:
+        df = pd.read_csv(csv_path)
+        print(f"✅ Loaded {len(df)} children from dataset")
+    except Exception as e:
+        print(f"❌ Error reading CSV: {e}")
+        print("⚠️  Creating demo dataset as fallback...")
+        return create_demo_dataset()
 
     # Replace gifts with coal for naughty children
     naughty_mask = df['nice'] == 0
@@ -55,6 +64,83 @@ def load_data():
     df.loc[naughty_mask, 'gift_weight_kg'] = COAL_WEIGHT
     df.loc[naughty_mask, 'gift_volume_l'] = COAL_VOLUME
 
+    return df
+
+
+def create_demo_dataset():
+    """Create a small demo dataset if the main CSV is not available"""
+    print("🎄 Creating demo dataset with 100 children...")
+
+    # Sample cities around the world
+    cities = [
+        ("London", "United Kingdom", 51.5074, -0.1278),
+        ("Paris", "France", 48.8566, 2.3522),
+        ("Berlin", "Germany", 52.5200, 13.4050),
+        ("Madrid", "Spain", 40.4168, -3.7038),
+        ("Rome", "Italy", 41.9028, 12.4964),
+        ("New York", "USA", 40.7128, -74.0060),
+        ("Los Angeles", "USA", 34.0522, -118.2437),
+        ("Chicago", "USA", 41.8781, -87.6298),
+        ("Tokyo", "Japan", 35.6762, 139.6503),
+        ("Sydney", "Australia", -33.8688, 151.2093),
+        ("Toronto", "Canada", 43.6532, -79.3832),
+        ("Moscow", "Russia", 55.7558, 37.6173),
+        ("Dubai", "UAE", 25.2048, 55.2708),
+        ("Singapore", "Singapore", 1.3521, 103.8198),
+        ("Mumbai", "India", 19.0760, 72.8777),
+    ]
+
+    gifts = [
+        ("LEGO Set", 0.73, 4.33),
+        ("Teddy Bear", 0.86, 12.28),
+        ("Video Game", 0.23, 0.73),
+        ("Board Game", 1.91, 9.27),
+        ("Doll", 0.76, 4.14),
+        ("RC Car", 1.67, 5.64),
+        ("Puzzle 1000pcs", 0.64, 3.51),
+        ("Basketball", 0.88, 7.21),
+        ("Art Kit", 1.45, 4.82),
+        ("Science Kit", 1.88, 6.48),
+    ]
+
+    names = ["Emma", "Liam", "Olivia", "Noah", "Ava", "William", "Sophia", "James",
+             "Isabella", "Oliver", "Charlotte", "Benjamin", "Mia", "Lucas", "Amelia"]
+
+    import random
+    random.seed(42)
+
+    data = []
+    for i in range(100):
+        city, country, lat, lon = random.choice(cities)
+        gift, weight, volume = random.choice(gifts)
+        name = random.choice(names) + " " + random.choice(["Smith", "Johnson", "Brown", "Davis", "Wilson"])
+        nice = random.random() > 0.2  # 80% nice, 20% naughty
+
+        # If naughty, replace with coal
+        if not nice:
+            gift = "Coal"
+            weight = COAL_WEIGHT
+            volume = COAL_VOLUME
+
+        data.append({
+            'child_id': i + 1,
+            'name': name,
+            'address_line': f"{random.randint(1, 999)} Main St",
+            'city': city,
+            'country': country,
+            'latitude': lat + random.uniform(-0.5, 0.5),
+            'longitude': lon + random.uniform(-0.5, 0.5),
+            'timezone': 'UTC',
+            'wishlist_item': gift,
+            'gift_weight_kg': weight,
+            'gift_volume_l': volume,
+            'nice': 1 if nice else 0,
+            'delivery_window_start_local': '22:00',
+            'delivery_window_end_local': '05:00'
+        })
+
+    df = pd.DataFrame(data)
+    print("✅ Demo dataset created with 100 children")
     return df
 
 
@@ -438,6 +524,23 @@ def api_export_route():
 
 
 if __name__ == '__main__':
-    print("🎅 Starting Santa's Delivery Optimizer...")
+    print("="*60)
+    print("🎅 Santa's Delivery Route Optimizer")
+    print("="*60)
+    print(f"📁 Working directory: {os.getcwd()}")
+    print(f"📁 Script directory: {SCRIPT_DIR}")
+
+    # Check for CSV file
+    csv_path = os.path.join(SCRIPT_DIR, 'santa_children_dataset_50k.csv')
+    if os.path.exists(csv_path):
+        csv_size = os.path.getsize(csv_path) / 1024 / 1024
+        print(f"✅ Found dataset: santa_children_dataset_50k.csv ({csv_size:.1f} MB)")
+    else:
+        print(f"⚠️  Dataset not found at: {csv_path}")
+        print(f"⚠️  Will use demo dataset (100 children) instead")
+
+    print("="*60)
     print("📍 Access the app at: http://localhost:5000")
+    print("="*60)
+
     app.run(debug=True, host='0.0.0.0', port=5000)

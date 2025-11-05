@@ -4,12 +4,38 @@
 
 ### Ursachen und Lösungen:
 
+### 0. 🎯 **Für GitHub-Benutzer - WICHTIG!**
+
+**Symptom:** Sie haben das Repo geklont und die App startet nicht richtig.
+
+**Lösung:**
+```bash
+# 1. Prüfen Sie, dass Sie auf dem richtigen Branch sind:
+git branch
+# Sollte zeigen: * claude/santa-delivery-optimizer-011CUpXmP5Q3GTAn6YYeiGuW
+
+# 2. Falls nicht, wechseln Sie:
+git checkout claude/santa-delivery-optimizer-011CUpXmP5Q3GTAn6YYeiGuW
+
+# 3. Stellen Sie sicher, dass die CSV-Datei vorhanden ist:
+ls -lh santa_children_dataset_50k.csv
+
+# 4. Falls die CSV fehlt, prüfen Sie beim Start der App:
+python app.py
+# Sie sollten sehen:
+# ✅ Found dataset: santa_children_dataset_50k.csv (6.2 MB)
+# ODER
+# ⚠️  Dataset not found - Will use demo dataset (100 children)
+```
+
+**Die App funktioniert auch OHNE die große CSV-Datei!** Sie erstellt automatisch ein Demo-Dataset mit 100 Kindern.
+
 ### 1. App wird nicht aus dem richtigen Verzeichnis gestartet
 
 **Lösung:**
 ```bash
 # Navigieren Sie zum AdvML-Verzeichnis
-cd /home/user/AdvML
+cd AdvML   # oder /home/user/AdvML
 
 # Starten Sie die App
 python app.py
