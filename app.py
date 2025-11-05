@@ -75,6 +75,102 @@ def create_distance_matrix(locations):
     return matrix
 
 
+def optimize_route_greedy(df, max_weight, max_volume, north_pole_lat=90.0, north_pole_lon=0.0):
+    """
+    Simple greedy nearest-neighbor algorithm as fallback
+    """
+    route = []
+    visited = set()
+    current_lat, current_lon = north_pole_lat, north_pole_lon
+    current_weight = 0
+    current_volume = 0
+
+    # Visit each child in nearest-first order
+    for _ in range(len(df)):
+        best_idx = None
+        best_distance = float('inf')
+
+        for idx in df.index:
+            if idx in visited:
+                continue
+
+            # Check if we can still carry this gift
+            gift_weight = df.loc[idx, 'gift_weight_kg']
+            gift_volume = df.loc[idx, 'gift_volume_l']
+
+            if current_weight + gift_weight > max_weight:
+                continue
+            if current_volume + gift_volume > max_volume:
+                continue
+
+            # Calculate distance
+            distance = calculate_distance(
+                current_lat, current_lon,
+                df.loc[idx, 'latitude'],
+                df.loc[idx, 'longitude']
+            )
+
+            if distance < best_distance:
+                best_distance = distance
+                best_idx = idx
+
+        if best_idx is None:
+            break  # No more children can be visited
+
+        # Visit this child
+        visited.add(best_idx)
+        current_lat = df.loc[best_idx, 'latitude']
+        current_lon = df.loc[best_idx, 'longitude']
+        current_weight += df.loc[best_idx, 'gift_weight_kg']
+        current_volume += df.loc[best_idx, 'gift_volume_l']
+
+        route.append({
+            'child_id': int(df.loc[best_idx, 'child_id']),
+            'name': df.loc[best_idx, 'name'],
+            'city': df.loc[best_idx, 'city'],
+            'country': df.loc[best_idx, 'country'],
+            'latitude': float(df.loc[best_idx, 'latitude']),
+            'longitude': float(df.loc[best_idx, 'longitude']),
+            'wishlist_item': df.loc[best_idx, 'wishlist_item'],
+            'gift_weight_kg': float(df.loc[best_idx, 'gift_weight_kg']),
+            'gift_volume_l': float(df.loc[best_idx, 'gift_volume_l']),
+            'nice': bool(df.loc[best_idx, 'nice']),
+            'order': len(route) + 1
+        })
+
+    # Calculate total distance
+    total_distance = 0
+    prev_lat, prev_lon = north_pole_lat, north_pole_lon
+    for stop in route:
+        distance = calculate_distance(prev_lat, prev_lon, stop['latitude'], stop['longitude'])
+        total_distance += distance
+        prev_lat, prev_lon = stop['latitude'], stop['longitude']
+
+    # Return to North Pole
+    total_distance += calculate_distance(prev_lat, prev_lon, north_pole_lat, north_pole_lon)
+
+    # Calculate metrics
+    delivery_time_hours = total_distance / SLEIGH_SPEED_KMH
+    naughty_count = len([r for r in route if not r['nice']])
+    nice_count = len(route) - naughty_count
+
+    metrics = {
+        'total_distance_km': round(total_distance, 2),
+        'total_weight_kg': round(current_weight, 2),
+        'total_volume_l': round(current_volume, 2),
+        'delivery_time_hours': round(delivery_time_hours, 2),
+        'children_delivered': len(route),
+        'nice_children': nice_count,
+        'naughty_children': naughty_count,
+        'weight_utilization_percent': round((current_weight / max_weight) * 100, 1),
+        'volume_utilization_percent': round((current_volume / max_volume) * 100, 1),
+        'time_constraint_met': delivery_time_hours <= 7,
+        'avg_distance_per_child': round(total_distance / len(route), 2) if route else 0
+    }
+
+    return route, metrics
+
+
 def optimize_route(df, max_weight=MAX_SLEIGH_WEIGHT, max_volume=MAX_SLEIGH_VOLUME,
                    sample_size=500, north_pole_lat=90.0, north_pole_lon=0.0):
     """
@@ -85,6 +181,23 @@ def optimize_route(df, max_weight=MAX_SLEIGH_WEIGHT, max_volume=MAX_SLEIGH_VOLUM
         df_sample = df.sample(n=sample_size, random_state=42)
     else:
         df_sample = df.copy()
+
+    # Check if total weight/volume exceeds capacity
+    total_weight = df_sample['gift_weight_kg'].sum()
+    total_volume = df_sample['gift_volume_l'].sum()
+
+    # If constraints can't be met, reduce sample size automatically
+    if total_weight > max_weight or total_volume > max_volume:
+        # Calculate how many children we can actually deliver
+        weight_ratio = max_weight / total_weight if total_weight > 0 else 1
+        volume_ratio = max_volume / total_volume if total_volume > 0 else 1
+        max_ratio = min(weight_ratio, volume_ratio, 1.0)
+
+        # Reduce sample size by 10% to leave some buffer
+        adjusted_size = int(len(df_sample) * max_ratio * 0.9)
+        adjusted_size = max(10, adjusted_size)  # At least 10 children
+
+        df_sample = df_sample.head(adjusted_size)
 
     # Add North Pole as starting point
     locations = [(north_pole_lat, north_pole_lon)] + list(zip(df_sample['latitude'], df_sample['longitude']))
@@ -112,7 +225,7 @@ def optimize_route(df, max_weight=MAX_SLEIGH_WEIGHT, max_volume=MAX_SLEIGH_VOLUM
     transit_callback_index = routing.RegisterTransitCallback(distance_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
 
-    # Add weight capacity constraint
+    # Add weight capacity constraint with some slack
     def weight_callback(from_index):
         from_node = manager.IndexToNode(from_index)
         return weights_int[from_node]
@@ -120,13 +233,13 @@ def optimize_route(df, max_weight=MAX_SLEIGH_WEIGHT, max_volume=MAX_SLEIGH_VOLUM
     weight_callback_index = routing.RegisterUnaryTransitCallback(weight_callback)
     routing.AddDimensionWithVehicleCapacity(
         weight_callback_index,
-        0,  # null capacity slack
+        int(max_weight * 100),  # Add 10% slack
         [int(max_weight * 1000)],  # vehicle maximum capacities
         True,  # start cumul to zero
         'Weight'
     )
 
-    # Add volume capacity constraint
+    # Add volume capacity constraint with some slack
     def volume_callback(from_index):
         from_node = manager.IndexToNode(from_index)
         return volumes_int[from_node]
@@ -134,81 +247,83 @@ def optimize_route(df, max_weight=MAX_SLEIGH_WEIGHT, max_volume=MAX_SLEIGH_VOLUM
     volume_callback_index = routing.RegisterUnaryTransitCallback(volume_callback)
     routing.AddDimensionWithVehicleCapacity(
         volume_callback_index,
-        0,  # null capacity slack
+        int(max_volume * 100),  # Add 10% slack
         [int(max_volume * 1000)],  # vehicle maximum capacities
         True,  # start cumul to zero
         'Volume'
     )
 
-    # Set search parameters
+    # Set search parameters with more relaxed settings
     search_parameters = pywrapcp.DefaultRoutingSearchParameters()
     search_parameters.first_solution_strategy = (
         routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     )
     search_parameters.local_search_metaheuristic = (
-        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+        routing_enums_pb2.LocalSearchMetaheuristic.AUTOMATIC
     )
-    search_parameters.time_limit.seconds = 30
+    search_parameters.time_limit.seconds = 60
+    search_parameters.log_search = False
 
     # Solve
     solution = routing.SolveWithParameters(search_parameters)
 
-    if solution:
-        # Extract route
-        route = []
-        index = routing.Start(0)
-        total_distance = 0
-        total_weight = 0
-        total_volume = 0
+    # If no solution found, try with greedy fallback
+    if not solution:
+        return optimize_route_greedy(df_sample, max_weight, max_volume, north_pole_lat, north_pole_lon)
 
-        while not routing.IsEnd(index):
-            node = manager.IndexToNode(index)
-            if node > 0:  # Skip North Pole start
-                child_idx = df_sample.index[node - 1]
-                route.append({
-                    'child_id': int(df_sample.loc[child_idx, 'child_id']),
-                    'name': df_sample.loc[child_idx, 'name'],
-                    'city': df_sample.loc[child_idx, 'city'],
-                    'country': df_sample.loc[child_idx, 'country'],
-                    'latitude': float(df_sample.loc[child_idx, 'latitude']),
-                    'longitude': float(df_sample.loc[child_idx, 'longitude']),
-                    'wishlist_item': df_sample.loc[child_idx, 'wishlist_item'],
-                    'gift_weight_kg': float(df_sample.loc[child_idx, 'gift_weight_kg']),
-                    'gift_volume_l': float(df_sample.loc[child_idx, 'gift_volume_l']),
-                    'nice': bool(df_sample.loc[child_idx, 'nice']),
-                    'order': len(route) + 1
-                })
-                total_weight += weights[node]
-                total_volume += volumes[node]
+    # Extract route from solution
+    route = []
+    index = routing.Start(0)
+    total_distance = 0
+    total_weight = 0
+    total_volume = 0
 
-            previous_index = index
-            index = solution.Value(routing.NextVar(index))
-            total_distance += routing.GetArcCostForVehicle(previous_index, index, 0) / 1000.0
+    while not routing.IsEnd(index):
+        node = manager.IndexToNode(index)
+        if node > 0:  # Skip North Pole start
+            child_idx = df_sample.index[node - 1]
+            route.append({
+                'child_id': int(df_sample.loc[child_idx, 'child_id']),
+                'name': df_sample.loc[child_idx, 'name'],
+                'city': df_sample.loc[child_idx, 'city'],
+                'country': df_sample.loc[child_idx, 'country'],
+                'latitude': float(df_sample.loc[child_idx, 'latitude']),
+                'longitude': float(df_sample.loc[child_idx, 'longitude']),
+                'wishlist_item': df_sample.loc[child_idx, 'wishlist_item'],
+                'gift_weight_kg': float(df_sample.loc[child_idx, 'gift_weight_kg']),
+                'gift_volume_l': float(df_sample.loc[child_idx, 'gift_volume_l']),
+                'nice': bool(df_sample.loc[child_idx, 'nice']),
+                'order': len(route) + 1
+            })
+            total_weight += weights[node]
+            total_volume += volumes[node]
 
-        # Calculate delivery time
-        delivery_time_hours = total_distance / SLEIGH_SPEED_KMH
+        previous_index = index
+        index = solution.Value(routing.NextVar(index))
+        total_distance += routing.GetArcCostForVehicle(previous_index, index, 0) / 1000.0
 
-        # Calculate metrics
-        naughty_count = len([r for r in route if not r['nice']])
-        nice_count = len(route) - naughty_count
+    # Calculate delivery time
+    delivery_time_hours = total_distance / SLEIGH_SPEED_KMH
 
-        metrics = {
-            'total_distance_km': round(total_distance, 2),
-            'total_weight_kg': round(total_weight, 2),
-            'total_volume_l': round(total_volume, 2),
-            'delivery_time_hours': round(delivery_time_hours, 2),
-            'children_delivered': len(route),
-            'nice_children': nice_count,
-            'naughty_children': naughty_count,
-            'weight_utilization_percent': round((total_weight / max_weight) * 100, 1),
-            'volume_utilization_percent': round((total_volume / max_volume) * 100, 1),
-            'time_constraint_met': delivery_time_hours <= 7,  # 22:00 to 05:00 = 7 hours
-            'avg_distance_per_child': round(total_distance / len(route), 2) if route else 0
-        }
+    # Calculate metrics
+    naughty_count = len([r for r in route if not r['nice']])
+    nice_count = len(route) - naughty_count
 
-        return route, metrics
-    else:
-        return None, None
+    metrics = {
+        'total_distance_km': round(total_distance, 2),
+        'total_weight_kg': round(total_weight, 2),
+        'total_volume_l': round(total_volume, 2),
+        'delivery_time_hours': round(delivery_time_hours, 2),
+        'children_delivered': len(route),
+        'nice_children': nice_count,
+        'naughty_children': naughty_count,
+        'weight_utilization_percent': round((total_weight / max_weight) * 100, 1),
+        'volume_utilization_percent': round((total_volume / max_volume) * 100, 1),
+        'time_constraint_met': delivery_time_hours <= 7,  # 22:00 to 05:00 = 7 hours
+        'avg_distance_per_child': round(total_distance / len(route), 2) if route else 0
+    }
+
+    return route, metrics
 
 
 @app.route('/')
