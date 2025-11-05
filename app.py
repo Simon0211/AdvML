@@ -9,11 +9,15 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import json
+import os
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 
 app = Flask(__name__)
 CORS(app)
+
+# Get the directory where this script is located
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Constants
 COAL_WEIGHT = 0.1  # kg
@@ -34,7 +38,16 @@ data_store = {
 
 def load_data():
     """Load and preprocess the children dataset"""
-    df = pd.read_csv('santa_children_dataset_50k.csv')
+    # Use absolute path relative to script location
+    csv_path = os.path.join(SCRIPT_DIR, 'santa_children_dataset_50k.csv')
+
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(
+            f"Dataset not found at {csv_path}. "
+            f"Please ensure santa_children_dataset_50k.csv is in the same directory as app.py"
+        )
+
+    df = pd.read_csv(csv_path)
 
     # Replace gifts with coal for naughty children
     naughty_mask = df['nice'] == 0
@@ -363,10 +376,18 @@ def api_optimize():
         max_volume = params.get('max_volume', MAX_SLEIGH_VOLUME)
         sample_size = params.get('sample_size', 500)
 
+        print(f"🎅 Optimization request: weight={max_weight}kg, volume={max_volume}L, children={sample_size}")
+
+        # Load data if not already loaded
         if data_store['children'] is None:
+            print("📂 Loading dataset...")
             df = load_data()
             data_store['children'] = df
+            print(f"✅ Loaded {len(df)} children")
+        else:
+            print(f"✅ Using cached dataset with {len(data_store['children'])} children")
 
+        print("🔄 Starting route optimization...")
         route, metrics = optimize_route(
             data_store['children'],
             max_weight=max_weight,
@@ -374,9 +395,10 @@ def api_optimize():
             sample_size=sample_size
         )
 
-        if route is not None:
+        if route is not None and len(route) > 0:
             data_store['route'] = route
             data_store['metrics'] = metrics
+            print(f"✅ Route optimized successfully: {len(route)} stops, {metrics['total_distance_km']} km")
 
             return jsonify({
                 'success': True,
@@ -384,12 +406,22 @@ def api_optimize():
                 'metrics': metrics
             })
         else:
+            error_msg = 'Could not find a valid route - no children could be delivered with given constraints'
+            print(f"❌ {error_msg}")
             return jsonify({
                 'success': False,
-                'error': 'Could not find a valid route'
+                'error': error_msg
             })
+    except FileNotFoundError as e:
+        error_msg = f"Dataset file not found: {str(e)}"
+        print(f"❌ {error_msg}")
+        return jsonify({'success': False, 'error': error_msg})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        import traceback
+        error_msg = f"Error during optimization: {str(e)}"
+        print(f"❌ {error_msg}")
+        print(traceback.format_exc())
+        return jsonify({'success': False, 'error': error_msg})
 
 
 @app.route('/api/export_route', methods=['GET'])
